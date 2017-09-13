@@ -1,5 +1,11 @@
-name: 'Bluezd&#039;s Home'
+url: http://www.bluezd.info/
+title: "Bluezd\'s Home"
 description: Stay Focused ~ Stay Positive
-theme: jekyll-theme-architect
+#pygments: true
+highlighter: true
+theme: minima
+#theme: jekyll-theme-architect
+twitter_username: bluezd
+github_username: bluezd
 disqus:
         shortname: bluezd

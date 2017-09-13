@@ -1,0 +1,1127 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.5.2">Jekyll</generator><link href="http://0.0.0.0:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://0.0.0.0:4000/" rel="alternate" type="text/html" /><updated>2017-09-13T17:07:48+08:00</updated><id>http://0.0.0.0:4000/</id><title type="html">Bluezd’s Home</title><subtitle>Stay Focused ~ Stay Positive</subtitle><entry><title type="html">SIGNAL_UNKILLABLE</title><link href="http://0.0.0.0:4000/archives/762" rel="alternate" type="text/html" title="SIGNAL_UNKILLABLE" /><published>2016-08-10T21:30:07+08:00</published><updated>2016-08-10T21:30:07+08:00</updated><id>http://0.0.0.0:4000/archives/signal_unkillable</id><content type="html" xml:base="http://0.0.0.0:4000/archives/762">&lt;p&gt;众所周知 &lt;code&gt;SIGKILL&lt;/code&gt; 信号不能被捕获，可以通过如下方法给进程发送此信号来结束它:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code class=&quot;language-{.bash}&quot;&gt;kill -s SIGKILL `pgrep XXX`
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;那么问题来了，可以给 init 进程发送此信号结束它吗? 显然是不能，如果 init 进程挂了，系统不就挂了吗?&lt;/p&gt;
+
+&lt;p&gt;验证一下:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code class=&quot;language-{.bash}&quot;&gt;kill -s SIGKILL 1
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;init 进程也就是 systemd 还在那里，没有任何改变。&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;原因就是内核在创建 init 进程的时候设置了 &lt;code&gt;SIGNAL_UNKILLABLE&lt;/code&gt; 这个 flag:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code class=&quot;language-{.c}&quot;&gt;kernel/fork.c
+--
+
+static struct task_struct *copy_process()
+{
+        ...
+        if ((clone_flags &amp;amp; CLONE_SIGHAND) &amp;amp;&amp;amp; !(clone_flags &amp;amp; CLONE_VM))
+                 return ERR_PTR(-EINVAL);
+        ...
+        if (likely(p-&amp;gt;pid)) {
+                ptrace_init_task(p, (clone_flags &amp;amp; CLONE_PTRACE) || trace);
+
+                init_task_pid(p, PIDTYPE_PID, pid);
+                if (thread_group_leader(p)) {
+                        init_task_pid(p, PIDTYPE_PGID, task_pgrp(current));
+                        init_task_pid(p, PIDTYPE_SID, task_session(current));
+
+                        if (is_child_reaper(pid)) {
+                                ns_of_pid(pid)-&amp;gt;child_reaper = p;
+                                p-&amp;gt;signal-&amp;gt;flags |= SIGNAL_UNKILLABLE;
+                        }
+        ...
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;内核 signal 相应处理:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code class=&quot;language-{.c}&quot;&gt;kernel/signal.c
+--
+
+static void complete_signal(int sig, struct task_struct *p, int group)
+{
+        ...
+        if (sig_fatal(p, sig) &amp;amp;&amp;amp;
+            !(signal-&amp;gt;flags &amp;amp; (SIGNAL_UNKILLABLE | SIGNAL_GROUP_EXIT)) &amp;amp;&amp;amp;
+            !sigismember(&amp;amp;t-&amp;gt;real_blocked, sig) &amp;amp;&amp;amp;
+            (sig == SIGKILL || !t-&amp;gt;ptrace)) {
+                ...
+        }
+        ...
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;写了个内核模块用于测试，主要是检索所有进程，查看是否设置了 &lt;code&gt;SIGNAL_UNKILLABLE&lt;/code&gt; flag, 如果设置了，打引出进程名字，并且如果 pid == 1 的话则 clear 这个 flag.&lt;/p&gt;
+
+&lt;p&gt;生成了模块后通过如下方法对模块进行签名(不签名也可以，取决于内核选项，一般也可以载入成功):&lt;/p&gt;
+
+&lt;pre&gt;&lt;code class=&quot;language-{.c}&quot;&gt;CONFIG_MODULE_SIG_HASH=&quot;sha256&quot;
+
+./sign-file sha256 ./signing_key.priv ./signing_key.x509 /path/to/XXX.ko
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;signing_key.priv 和 signing_key.x509是在编译内核的时候通过 x509.genkey 配置文件生成的，通过如下命令:&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;language-{.c}&quot;&gt;kernel/Makefile
+--
+
+openssl req -new -nodes -utf8 -$(CONFIG_MODULE_SIG_HASH) -days 36500 \
+        -batch -x509 -config x509.genkey \
+        -outform DER -out signing_key.x509 \
+        -keyout signing_key.priv 2&amp;gt;&amp;amp;1
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;然后内核把 signing_key.x509(公钥) 写到 x509_certificate_list最后加载到内核中去，当手工载入模块的时候 内核会通过这个公钥对这个模块进行验证。所以在生成模块后需要用那两个公钥和私钥对模块进行签名，以便内核 可以验证并且知道这个模块是安全的。&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;Summary:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;在 Bare Metal系统中只有 init 进程设置了 &lt;code&gt;SIGNAL_UNKILLABLE&lt;/code&gt; flag.&lt;/li&gt;
+  &lt;li&gt;clear 这个 flag 后如果发送 SIGKILL 信号 init 进程, 进程被 kill 掉了，系统也 panic 挂掉了。&lt;/li&gt;
+&lt;/ol&gt;</content><author><name>bluezd</name></author><category term="kernel" /><category term="signal" /><summary type="html">众所周知 SIGKILL 信号不能被捕获，可以通过如下方法给进程发送此信号来结束它:</summary></entry><entry><title type="html">五一游</title><link href="http://0.0.0.0:4000/archives/737" rel="alternate" type="text/html" title="五一游" /><published>2015-05-07T04:43:54+08:00</published><updated>2015-05-07T04:43:54+08:00</updated><id>http://0.0.0.0:4000/archives/%E4%BA%94%E4%B8%80%E6%B8%B8</id><content type="html" xml:base="http://0.0.0.0:4000/archives/737">&lt;p&gt;好久没有写了，这次真的是好久没有写了，越来越懒了。&lt;/p&gt;
+
+&lt;p&gt;回到大连已经一年多了，每天步行上下班，住自己家，不用租房，很是舒服。可是生活啊不可能没有问题，总是一个接着一个，咋办呢？坦然面对就好。&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;年初败了一块手表，最近又败了一个相机，虽然都是我梦寐以求想要的，可是真心心疼啊。据说一个男人一生中拥有美酒、跑车、相机、金表才算完整，目前还差两样，等以后发家致富中彩票后再考虑吧。&lt;/p&gt;
+
+&lt;p&gt;五一前败的微单 &lt;code&gt;Sony A7M2&lt;/code&gt;，看了又看等了又等，最终还是横下一条心，买！走上了这条不归路(第二天就看上了蔡司35的定焦头)。。。。。。 买完后各种研究，趁着五一和家人出去溜达赏花，顺便也实战演练下。&lt;/p&gt;
+
+&lt;p&gt;多说无益，上图！&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00268.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00268-1024x682.jpg&quot; alt=&quot;DSC00268&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-740&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00268-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00268-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00307.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00307-1024x682.jpg&quot; alt=&quot;DSC00307&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-741&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00307-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00307-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00783.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00783-1024x682.jpg&quot; alt=&quot;DSC00783&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-748&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00783-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00783-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00769.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00769-1024x682.jpg&quot; alt=&quot;DSC00769&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-743&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00769-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00769-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00395.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00395-1024x682.jpg&quot; alt=&quot;DSC00395&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-742&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00395-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00395-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00770.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00770-1024x682.jpg&quot; alt=&quot;DSC00770&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-745&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00770-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00770-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00832.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00832-1024x682.jpg&quot; alt=&quot;DSC00832&quot; width=&quot;640&quot; height=&quot;426&quot; class=&quot;aligncenter size-large wp-image-746&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2015/05/DSC00832-1024x682.jpg 1024w, http://www.bluezd.info/wp-content/uploads/2015/05/DSC00832-300x200.jpg 300w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;想要拍出一张好的照片很难，尤其是对于一个摄影菜鸟来说，要学习的东西还很多！&lt;/p&gt;</content><author><name>bluezd</name></author><category term="life" /><category term="大连" /><summary type="html">好久没有写了，这次真的是好久没有写了，越来越懒了。</summary></entry><entry><title type="html">NameCom DDNS 解决方案</title><link href="http://0.0.0.0:4000/archives/731" rel="alternate" type="text/html" title="NameCom DDNS 解决方案" /><published>2014-09-27T02:24:18+08:00</published><updated>2014-09-27T02:24:18+08:00</updated><id>http://0.0.0.0:4000/archives/namecom-ddns-%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88</id><content type="html" xml:base="http://0.0.0.0:4000/archives/731">&lt;h4 id=&quot;namecom&quot;&gt;Namecom&lt;/h4&gt;
+
+&lt;p&gt;众所周知 &lt;a href=&quot;http://www.name.com/&quot;&gt;name.com&lt;/a&gt; 是一家域名注册商，相比较 Godaddy 它界面简洁操作方便，早年便从 Godaddy 转投了 name.com。&lt;/p&gt;
+
+&lt;h4 id=&quot;ddns&quot;&gt;DDNS&lt;/h4&gt;
+
+&lt;p&gt;家里用的是 DD-WRT 路由器，花生壳 ddns 时常不好用，很是烦恼，于是有了这个写个 python 脚本自动更新 IP的想法。&lt;/p&gt;
+
+&lt;p&gt;由于已经在 name.com 购买了一个域名，于是就像通过增加一个子域名 DNS Record 来实现 DDNS。 原理就是在路由器上跑一个脚本，每隔一段时间检查当前 IP 地址是否有变更，如果有则更新 name.com 上的记录。&lt;/p&gt;
+
+&lt;p&gt;开发过程很简单，首先提交一个 API Application Form 的申请，通过后会得到一个 API Token，然后通过 JSON 提交奥 http request 与 name.com 交互。&lt;/p&gt;
+
+&lt;p&gt;参考文档：&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;a href=&quot;http://www.name.com/reseller/apply&quot;&gt;http://www.name.com/reseller/apply&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://www.name.com/reseller&quot;&gt;https://www.name.com/reseller&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://www.name.com/reseller/API-documentation&quot;&gt;https://www.name.com/reseller/API-documentation&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;另外我将这个项目的源码放到了 github 上，有兴趣的可以看一下：&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://github.com/bluezd/NameComDomain&quot;&gt;https://github.com/bluezd/NameComDomain&lt;/a&gt;&lt;/p&gt;</content><author><name>bluezd</name></author><category term="ddns" /><category term="python" /><summary type="html">Namecom</summary></entry><entry><title type="html">搬家到 BudgetVM</title><link href="http://0.0.0.0:4000/archives/725" rel="alternate" type="text/html" title="搬家到 BudgetVM" /><published>2014-07-25T18:34:52+08:00</published><updated>2014-07-25T18:34:52+08:00</updated><id>http://0.0.0.0:4000/archives/budgetvm</id><content type="html" xml:base="http://0.0.0.0:4000/archives/725">&lt;h4 id=&quot;burst-vps&quot;&gt;Burst VPS&lt;/h4&gt;
+
+&lt;p&gt;用了3年的 Burst VPS 破产了，于今天正式倒闭。之前选择 Burst VPS 就是因为便宜，没曾想突然倒闭了，交了一年的钱还剩三个月左右，官方也不给退款了。不过有提前通知，数据什么的早就有定时备份。&lt;/p&gt;
+
+&lt;h4 id=&quot;budget-vps&quot;&gt;Budget VPS&lt;/h4&gt;
+
+&lt;p&gt;于是乎迁移到了 &lt;a href=&quot;https://www.budgetvm.com/&quot;&gt;BudegtVM&lt;/a&gt;, 虽然数据没丢，但对于一个长期用 wordpress 的人来说很是折腾，各种重装，各种重新配置，不喜欢折腾了。为什么选择它呢？ 还是因为便宜。&lt;/p&gt;
+
+&lt;p&gt;我购买的是如下套餐:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Linux VPS (OpenVZ) – 1024MB VPS&amp;lt;/p&amp;gt;
+    &lt;ul&gt;
+      &lt;li&gt;1024MB Ram&lt;/li&gt;
+      &lt;li&gt;2048MB Ram Burst&lt;/li&gt;
+      &lt;li&gt;4 E5-2620 CPU Core&lt;/li&gt;
+      &lt;li&gt;80GB Disk Space&lt;/li&gt;
+      &lt;li&gt;3000GB Bandwidth&lt;/li&gt;
+      &lt;li&gt;3 IPv4 IP Address&lt;/li&gt;
+      &lt;li&gt;16 IPv6 IP Address&lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;由于是 openvz 的 VM 有如下限制:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;只能装 Linux(可选择的发行版挺多的)&lt;/li&gt;
+  &lt;li&gt;VPN 只能搞 openvpn, 翻墙的话建议 ssh -D&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;价格还行，买一年的话一个月 4 刀,开通速度也挺快的，没有购买其他 Control Panel, 只有一个很简单的。&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;总之个人觉得性价比还是挺高的，ping 值也还行，希望它坚挺些，别倒闭了，不想再折腾了。&lt;/p&gt;</content><author><name>bluezd</name></author><category term="VPS" /><summary type="html">Burst VPS</summary></entry><entry><title type="html">2013 让我欢喜让我忧</title><link href="http://0.0.0.0:4000/archives/716" rel="alternate" type="text/html" title="2013 让我欢喜让我忧" /><published>2013-12-02T06:02:25+08:00</published><updated>2013-12-02T06:02:25+08:00</updated><id>http://0.0.0.0:4000/archives/2013-%E8%AE%A9%E6%88%91%E6%AC%A2%E5%96%9C%E8%AE%A9%E6%88%91%E5%BF%A7</id><content type="html" xml:base="http://0.0.0.0:4000/archives/716">&lt;p&gt;2013 年还有一个月就要过去了，年初信誓旦旦的定下了几个目标，如今在时间和现实面前显得那么的苍白。惭愧啊，总体来说这一年四个字差强人意吧。&lt;/p&gt;
+
+&lt;h4 id=&quot;工作&quot;&gt;工作&lt;/h4&gt;
+
+&lt;p&gt;最近工作上有了些变动，transfer 到隔壁组做起了一个开发的工作，虽不是纯内核开发，但是觉得还是对自己有很大的锻炼价值，至少离我的目标更近了一步。有的时候期望越大恐怕失望就越大，还是保持一颗平常心吧，改掉一些坏习惯比如说眼高手低，努力把工作做好。&lt;/p&gt;
+
+&lt;p&gt;同时也感谢下以前的 Manager 以及所有帮过我的人，感谢你们在工作中给予的支持与帮助。&lt;/p&gt;
+
+&lt;h4 id=&quot;生活&quot;&gt;生活&lt;/h4&gt;
+
+&lt;p&gt;作为一个北漂，来到这个陌生的城市纯粹是为了工作，我实在是找不到其它理由。北漂生活说实话苦，厌倦了租房，厌倦了糟糕的空气，更厌倦了挤公交地铁时的情景。有的时候就会问自己为什么明明不喜欢还要留下，满五年然后买房，然后用一辈子的时间来还贷，辛辛苦苦一辈子就为了买个房子 ?&lt;/p&gt;
+
+&lt;p&gt;想想这一年，每次最最开心的时候就是回家了。虽说从高中的时候就离开父母独自生活了，但是多愁善感的我每次走的时候还是那么的不舍，表面上装的很坚强很不屑，看着他们离去的背影心里还是那么的不好受。父母日渐老去，他们不指望着你能挣多少多少钱让他们能过上多么幸福的生活，只希望能多陪陪他们。我知道我没出息，男子汉应该志在四方，不能太在乎儿女情长，可是这就是最最真实的我啊。&lt;/p&gt;
+
+&lt;p&gt;而我确实也希望能有一个很好的事业。这个世道，钱的多少是检验一个男人成功与否的唯一标准，哎，做人难，做男人更难 。。。有的时候确实很纠结啊。&lt;/p&gt;
+
+&lt;h4 id=&quot;其它&quot;&gt;其它&lt;/h4&gt;
+
+&lt;p&gt;作为一个 IT 屌丝，每天的业余的生活大家也都懂得，不是无聊，是相当无聊。&lt;/p&gt;
+
+&lt;p&gt;关于女朋友这个事情自己确实没有那么着急，可是身边的同事啊朋友啊大多数都有妹子了，有时候被刺激的确实受不了了。所以最近为了排遣寂寞，自己每天下班坚持看书，希望能在书的海洋中找回已经在寂寞中迷失的自己。&lt;/p&gt;
+
+&lt;p&gt;突然想起一句歌词：&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;迟两秒搭上&lt;br /&gt;
+地下铁能与你碰上么&lt;br /&gt;
+如提前十步&lt;br /&gt;
+入电梯谁又被错过&lt;br /&gt;
+和某某从来&lt;br /&gt;
+未预约为何能见更多&lt;br /&gt;
+全城来撞你&lt;br /&gt;
+但最后处处有险阻&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;有些事情真的是力不从心啊，反正一切事情不强求顺其自然吧 。。。&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;h4 id=&quot;2014&quot;&gt;2014&lt;/h4&gt;
+
+&lt;p&gt;希望自己在新的一年中一切尽量顺利吧，说心想事成绝对是扯淡。&lt;/p&gt;</content><author><name>bluezd</name></author><category term="life" /><category term="帝都" /><summary type="html">2013 年还有一个月就要过去了，年初信誓旦旦的定下了几个目标，如今在时间和现实面前显得那么的苍白。惭愧啊，总体来说这一年四个字差强人意吧。</summary></entry><entry><title type="html">OVS LISP Tunnel Configuration</title><link href="http://0.0.0.0:4000/archives/710" rel="alternate" type="text/html" title="OVS LISP Tunnel Configuration" /><published>2013-11-20T03:32:16+08:00</published><updated>2013-11-20T03:32:16+08:00</updated><id>http://0.0.0.0:4000/archives/ovs-lisp-tunnel-configuration</id><content type="html" xml:base="http://0.0.0.0:4000/archives/710">&lt;h2 id=&quot;install&quot;&gt;Install&lt;/h2&gt;
+
+&lt;ol style=&quot;list-style-type: decimal&quot;&gt;
+  &lt;li&gt;
+    &lt;code&gt;git clone git://git.openvswitch.org/openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;cd openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;./boot.sh&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;./configure --with-linux=/lib/modules/${uname -r}/build&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;make&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;make install;make modules_install&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;modprobe openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;mkdir -p /usr/local/etc/openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;ovsdb-tool create /usr/local/etc/openvswitch/conf.db vswitchd/vswitch.ovsschema&lt;/code&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;startup&quot;&gt;Startup&lt;/h2&gt;
+
+&lt;ol style=&quot;list-style-type: decimal&quot;&gt;
+  &lt;li&gt;
+    ovsdb-server &amp;#8211;remote=punix:/usr/local/var/run/openvswitch/db.sock &lt;br /&gt; &amp;#8211;remote=db:Open_vSwitch,Open_vSwitch,manager_options &lt;br /&gt; &amp;#8211;private-key=db:Open_vSwitch,SSL,private_key &lt;br /&gt; &amp;#8211;certificate=db:Open_vSwitch,SSL,certificate &lt;br /&gt; &amp;#8211;bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert &lt;br /&gt; &amp;#8211;pidfile &amp;#8211;detach
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;ovs-vsctl --no-wait init&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;ovs-vswitchd --pidfile --detach&lt;/code&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;lisp-tunnel-configuration&quot;&gt;LISP Tunnel Configuration&lt;/h2&gt;
+
+&lt;h4 id=&quot;topo&quot;&gt;Topo&lt;/h4&gt;
+
+&lt;pre&gt;&lt;code&gt;               +---+                               +---+
+               |VM1|                               |VM2|
+               +---+                               +---+
+                 |                                   |
+           +-- vnet0 --+                       +-- vnet0 --+
+           |           |                       |           |
+        lisp0   OVS1  eth0--------------------eth0  OVS2  lisp0
+           |           |                       |           |
+           +-----------+                       +-----------+
+               Host1                               Host2
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h4 id=&quot;configuration&quot;&gt;Configuration&lt;/h4&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Host1
+    &lt;ul&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br2&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br1 em1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig em1 0;dhclient br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig br2 10.1.1.1 netmask 255.255.255.0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br2 lisp0 -- set Interface lisp0 type=lisp options:remote_ip=192.168.1.252&lt;/code&gt;&lt;br /&gt;
+192.168.1.252 is Host2 eth0’s ip address&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=0,action=NORMAL&quot;&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=2,in_port=1,dl_type=0x0806,action=NORMAL&quot;&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=3,dl_dst=02:00:00:00:00:00,action=mod_dl_dst:52:54:00:B8:27:75,output:1&quot;&lt;/code&gt;&lt;br /&gt;
+52:54:00:B8:27:75 is VM1’s mac address&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=1,in_port=1,dl_type=0x0800,vlan_tci=0,nw_src=10.1.1.0/24,action=output:2&quot;&lt;/code&gt;&lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+  &lt;li&gt;VM1
+    &lt;ul&gt;
+      &lt;li&gt;&lt;code&gt;virsh dumpxml kvm1 &amp;gt; domain.xml&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;search the XML &lt;interface type=&quot;network&quot;&gt; section and change it to something like this:&lt;/interface&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;virsh create domain.xml&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig eth3 up&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig eth3 10.1.1.20 netmask 255.255.255.0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;echo &quot;10.1.1.30 52:54:00:1B:EA:D5&quot; &amp;gt; /etc/ethers&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;
+        &lt;p&gt;&lt;code&gt;arp -f /etc/ethers&lt;/code&gt;&lt;/p&gt;
+
+        &lt;pre&gt;&lt;code&gt; &amp;lt;interface type=&amp;amp;#39;bridge&amp;amp;#39;&amp;gt;
+   &amp;lt;mac address=&amp;amp;#39;52:54:00:b8:27:75&amp;amp;#39;/&amp;gt;
+   &amp;lt;source bridge=&amp;amp;#39;br2&amp;amp;#39;/&amp;gt;
+   &amp;lt;virtualport type=&amp;amp;#39;openvswitch&amp;amp;#39;&amp;gt;
+   &amp;lt;/virtualport&amp;gt;
+   &amp;lt;model type=&amp;amp;#39;virtio&amp;amp;#39;/&amp;gt;
+   &amp;lt;address type=&amp;amp;#39;pci&amp;amp;#39; domain=&amp;amp;#39;0x0000&amp;amp;#39; bus=&amp;amp;#39;0x00&amp;amp;#39; slot=&amp;amp;#39;0x03&amp;amp;#39; function=&amp;amp;#39;0x0&amp;amp;#39;/&amp;gt;
+ &amp;lt;/interface&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+        &lt;h1 id=&quot;ovs-vsctl-show&quot;&gt;ovs-vsctl show&lt;/h1&gt;
+        &lt;p&gt;390982aa-7bf6-4dfd-84eb-76fe7654e73d
+    Bridge “br2”
+    Port “vnet0”
+        Interface “vnet0”
+    Port “lisp0”
+        Interface “lisp0”
+        type: lisp
+        options: {remote_ip=”192.168.1.252”}
+    Port “br2”
+        Interface “br2”
+        type: internal
+    Bridge “br1”
+    Port “br1”
+        Interface “br1”
+        type: internal
+    Port “em1”
+        Interface “em1”&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-ofctl-show-br2&quot;&gt;ovs-ofctl show br2&lt;/h1&gt;
+        &lt;p&gt;OFPT_FEATURES_REPLY (xid=0x2): dpid:00008ad828ce7949
+n_tables:254, n_buffers:256
+capabilities: FLOW_STATS TABLE_STATS PORT_STATS QUEUE_STATS ARP_MATCH_IP
+actions: OUTPUT SET_VLAN_VID SET_VLAN_PCP STRIP_VLAN SET_DL_SRC SET_DL_DST SET_NW_SRC SET_NW_DST SET_NW_TOS SET_TP_SRC SET_T        P_DST ENQUEUE
+ 1(vnet0): addr:fe:54:00:b8:27:75
+     config:     0
+     state:      0
+     current:    10MB-FD COPPER
+     speed: 10 Mbps now, 0 Mbps max
+ 2(lisp0): addr:36:d5:4f:15:c0:7a
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+ LOCAL(br2): addr:8a:d8:28:ce:79:49
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-ofctl-dump-ports-br2&quot;&gt;ovs-ofctl dump-ports br2&lt;/h1&gt;
+        &lt;p&gt;OFPST_PORT reply (xid=0x2): 3 ports
+  port  1: rx pkts=609, bytes=58706, drop=0, errs=0, frame=0, over=0, crc=0
+       tx pkts=341, bytes=33418, drop=0, errs=0, coll=0
+  port  2: rx pkts=429, bytes=42042, drop=0, errs=0, frame=0, over=0, crc=0
+       tx pkts=582, bytes=56532, drop=0, errs=0, coll=0
+  port LOCAL: rx pkts=6, bytes=468, drop=0, errs=0, frame=0, over=0, crc=0
+       tx pkts=296, bytes=28032, drop=0, errs=0, coll=0&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-ofctl-dump-flows-br2&quot;&gt;ovs-ofctl dump-flows br2&lt;/h1&gt;
+        &lt;p&gt;NXST_FLOW reply (xid=0x4):
+ cookie=0x0, duration=1615.828s, table=0, n_packets=195, n_bytes=19110, idle_age=1378, priority=3,dl_dst=02:00:00:00:00:00 a         ctions=mod_dl_dst:52:54:00:b8:27:75,output:1
+ cookie=0x0, duration=1717.963s, table=0, n_packets=326, n_bytes=31948, idle_age=1539, priority=0 actions=NORMAL
+ cookie=0x0, duration=1519.394s, table=0, n_packets=101, n_bytes=9898, idle_age=1378, priority=1,ip,in_port=1,vlan_tci=0x000         0,nw_src=10.1.1.0/24 actions=output:2
+ cookie=0x0, duration=1667.873s, table=0, n_packets=0, n_bytes=0, idle_age=1667, priority=2,arp,in_port=1 actions=NORMAL&lt;/p&gt;
+      &lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+  &lt;li&gt;Host2
+    &lt;ul&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br2&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br1 eth0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig em1 0;dhclient br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig br2 10.1.1.2 netmask 255.255.255.0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br2 lisp0 -- set Interface lisp0 type=lisp options:remote_ip=192.168.1.249&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=0,action=NORMAL&quot;&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=2,in_port=1,dl_type=0x0806,action=NORMAL&quot;&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;strong&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=3,dl_dst=02:00:00:00:00:00,action=mod_dl_dst:52:54:00:1B:EA:D5,output:1&quot;&lt;/code&gt;&lt;/strong&gt; 52:54:00:1B:EA:D5 is VM2’s mac address&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-ofctl add-flow br2 &quot;priority=1,in_port=1,dl_type=0x0800,vlan_tci=0,nw_src=10.1.1.0/24,action=output:2&quot;&lt;/code&gt;&lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+  &lt;li&gt;VM2
+    &lt;ul&gt;
+      &lt;li&gt;redid the configuration as VM1&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig eth5 up&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig eth5 10.1.1.30 netmask 255.255.255.0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;echo &quot;10.1.1.20 52:54:00:B8:27:75&quot; &amp;gt; /etc/ethers&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;
+        &lt;p&gt;&lt;code&gt;arp -f /etc/ethers&lt;/code&gt;&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-vsctl-show-1&quot;&gt;ovs-vsctl show&lt;/h1&gt;
+        &lt;p&gt;66f0d773-a7c9-451e-980b-c2def85eda23
+    Bridge “br2”
+    Port “br2”
+        Interface “br2”
+        type: internal
+    Port “lisp0”
+        Interface “lisp0”
+        type: lisp
+        options: {remote_ip=”192.168.1.249”}
+    Port “vnet0”
+        Interface “vnet0”
+    Bridge “br1”
+    Port “eth0”
+        Interface “eth0”
+    Port “br1”
+        Interface “br1”
+        type: internal&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-ofctl-show-br2-1&quot;&gt;ovs-ofctl show br2&lt;/h1&gt;
+        &lt;p&gt;OFPT_FEATURES_REPLY (xid=0x2): dpid:00001e2e0e0cf040
+n_tables:254, n_buffers:256
+capabilities: FLOW_STATS TABLE_STATS PORT_STATS QUEUE_STATS ARP_MATCH_IP
+actions: OUTPUT SET_VLAN_VID SET_VLAN_PCP STRIP_VLAN SET_DL_SRC SET_DL_DST SET_NW_SRC SET_NW_DST SET_NW_TOS SET_TP_SRC SET_T        P_DST ENQUEUE
+ 1(vnet0): addr:fe:54:00:1b:ea:d5
+     config:     0
+     state:      0
+     current:    10MB-FD COPPER
+     speed: 10 Mbps now, 0 Mbps max
+ 2(lisp0): addr:96:fa:62:5b:6f:09
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+ LOCAL(br2): addr:1e:2e:0e:0c:f0:40
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-ofctl-dump-ports-br2-1&quot;&gt;ovs-ofctl dump-ports br2&lt;/h1&gt;
+        &lt;p&gt;OFPST_PORT reply (xid=0x2): 3 ports
+  port  1: rx pkts=657, bytes=60526, drop=0, errs=0, frame=0, over=0, crc=0
+       tx pkts=401, bytes=39094, drop=0, errs=0, coll=0
+  port  2: rx pkts=617, bytes=60466, drop=0, errs=0, frame=0, over=0, crc=0
+       tx pkts=593, bytes=54754, drop=0, errs=0, coll=0
+  port LOCAL: rx pkts=11, bytes=790, drop=0, errs=0, frame=0, over=0, crc=0
+       tx pkts=294, bytes=24952, drop=0, errs=0, coll=0&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-ofctl-dump-flows-br2-1&quot;&gt;ovs-ofctl dump-flows br2&lt;/h1&gt;
+        &lt;p&gt;NXST_FLOW reply (xid=0x4):
+ cookie=0x0, duration=246.526s, table=0, n_packets=38, n_bytes=3724, idle_age=170, priority=3,dl_dst=02:00:00:00:00:00 actio         ns=mod_dl_dst:52:54:00:1b:ea:d5,output:1
+ cookie=0x0, duration=293.084s, table=0, n_packets=98, n_bytes=9604, idle_age=234, priority=0 actions=NORMAL
+ cookie=0x0, duration=194.739s, table=0, n_packets=23, n_bytes=2254, idle_age=170, priority=1,ip,in_port=1,vlan_tci=0x0000,n         w_src=10.1.1.0/24 actions=output:2
+ cookie=0x0, duration=285.264s, table=0, n_packets=0, n_bytes=0, idle_age=285, priority=2,arp,in_port=1 actions=NORMAL&lt;/p&gt;
+      &lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4 id=&quot;test&quot;&gt;Test&lt;/h4&gt;
+
+&lt;p&gt;ping test:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;    # ping 10.1.1.30
+    PING 10.1.1.30 (10.1.1.30) 56(84) bytes of data.
+    64 bytes from 10.1.1.30: icmp_seq=1 ttl=64 time=3.51 ms
+    64 bytes from 10.1.1.30: icmp_seq=2 ttl=64 time=1.21 ms
+    64 bytes from 10.1.1.30: icmp_seq=3 ttl=64 time=1.62 ms
+    64 bytes from 10.1.1.30: icmp_seq=4 ttl=64 time=1.80 ms
+    64 bytes from 10.1.1.30: icmp_seq=5 ttl=64 time=1.33 ms
+    64 bytes from 10.1.1.30: icmp_seq=6 ttl=64 time=1.49 ms
+    64 bytes from 10.1.1.30: icmp_seq=7 ttl=64 time=1.66 ms
+
+    Capture the packets on VM2 at the same time:   
+
+    # tcpdump -i eth5 -xxx
+    tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+    listening on eth5, link-type EN10MB (Ethernet), capture size 65535 bytes
+    03:01:22.900663 IP 10.1.1.20 &amp;gt; 10.1.1.30: ICMP echo request, id 59656, seq 1, length 64
+        0x0000:  5254 001b ead5 0200 0000 0000 0800 4500
+        0x0010:  0054 0000 4000 4001 2476 0a01 0114 0a01
+        0x0020:  011e 0800 cb2f e908 0001 533d 7f52 0000
+        0x0030:  0000 ae63 0400 0000 0000 1011 1213 1415
+        0x0040:  1617 1819 1a1b 1c1d 1e1f 2021 2223 2425
+        0x0050:  2627 2829 2a2b 2c2d 2e2f 3031 3233 3435
+        0x0060:  3637
+    03:01:22.900735 IP 10.1.1.30 &amp;gt; 10.1.1.20: ICMP echo reply, id 59656, seq 1, length 64
+        0x0000:  5254 00b8 2775 5254 001b ead5 0800 4500
+        0x0010:  0054 fff3 0000 4001 6482 0a01 011e 0a01
+        0x0020:  0114 0000 d32f e908 0001 533d 7f52 0000
+        0x0030:  0000 ae63 0400 0000 0000 1011 1213 1415
+        0x0040:  1617 1819 1a1b 1c1d 1e1f 2021 2223 2425
+        0x0050:  2627 2829 2a2b 2c2d 2e2f 3031 3233 3435
+        0x0060:  3637
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;ftrace debug(send):&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;code&gt;cd /sys/kernel/debug/tracing&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;code&gt;echo &quot;iptunnel_xmit&quot; &amp;gt; set_ftrace_filter&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;code&gt;echo &quot;function&quot; &amp;gt; current_tracer&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;code&gt;echo &quot;1&quot; &amp;gt; tracing_on&lt;/code&gt;&lt;/p&gt;
+
+    &lt;pre&gt;&lt;code&gt;# cat trace
+# tracer: function
+#
+# entries-in-buffer/entries-written: 6/6   #P:4
+#
+#                              _-----=&amp;gt; irqs-off
+#                             / _----=&amp;gt; need-resched
+#                            | / _---=&amp;gt; hardirq/softirq
+#                            || / _--=&amp;gt; preempt-depth
+#                            ||| /     delay
+#           TASK-PID   CPU#  ||||    TIMESTAMP  FUNCTION
+#              | |       |   ||||       |         |
+    upcall_6-2529  001 ..s. 78269.070472: iptunnel_xmit -lisp_send
+     vhost-31615-31617 003 ..s. 78270.070891: iptunnel_xmit -lisp_send
+     vhost-31615-31617 000 ..s. 78271.072337: iptunnel_xmit -lisp_send
+     vhost-31615-31617 000 ..s. 78272.073472: iptunnel_xmit -lisp_send
+     vhost-31615-31617 000 ..s. 78273.075184: iptunnel_xmit -lisp_send
+     vhost-31615-31617 002 ..s. 78274.076124: iptunnel_xmit -lisp_send
+&lt;/code&gt;&lt;/pre&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;ftrace debug(reveive):&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;code&gt;cd /sys/kernel/debug/tracing&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;code&gt;echo &quot;ovs_vport_receive&quot; &amp;gt; set_ftrace_filter&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;code&gt;echo &quot;function&quot; &amp;gt; current_tracer&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;code&gt;echo &quot;1&quot; &amp;gt; tracing_on&lt;/code&gt;&lt;/p&gt;
+
+    &lt;pre&gt;&lt;code&gt;# cat trace | grep lisp_rcv
+    upcall_5-2530  003 ..s1 78668.265341: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78669.266634: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78670.268925: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78671.269857: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78672.271818: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78673.273648: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78674.275753: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78675.277631: ovs_vport_receive -lisp_rcv
+        Xorg-743   002 ..s. 78676.279053: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78677.281010: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78678.282785: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78679.284470: ovs_vport_receive -lisp_rcv
+      &amp;lt;idle&amp;gt;-0     002 ..s. 78680.285205: ovs_vport_receive -lisp_rcv
+&lt;/code&gt;&lt;/pre&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;All done.&lt;/p&gt;</content><author><name>bluezd</name></author><category term="networking" /><category term="ovs" /><category term="tunnel" /><summary type="html">Install</summary></entry><entry><title type="html">OVS GRE Tunnel Configuration</title><link href="http://0.0.0.0:4000/archives/700" rel="alternate" type="text/html" title="OVS GRE Tunnel Configuration" /><published>2013-11-11T01:54:49+08:00</published><updated>2013-11-11T01:54:49+08:00</updated><id>http://0.0.0.0:4000/archives/ovs-gre-tunnel-configuration</id><content type="html" xml:base="http://0.0.0.0:4000/archives/700">&lt;h2 id=&quot;install&quot;&gt;Install&lt;/h2&gt;
+
+&lt;ol style=&quot;list-style-type: decimal&quot;&gt;
+  &lt;li&gt;
+    &lt;code&gt;git clone git://git.openvswitch.org/openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;cd openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;./boot.sh&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;./configure --with-linux=/lib/modules/${uname -r}/build&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;make&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;make install&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;make modules_install&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;modprobe openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;mkdir -p /usr/local/etc/openvswitch&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;ovsdb-tool create /usr/local/etc/openvswitch/conf.db vswitchd/vswitch.ovsschema&lt;/code&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;startup&quot;&gt;Startup&lt;/h2&gt;
+
+&lt;ol style=&quot;list-style-type: decimal&quot;&gt;
+  &lt;li&gt;
+    ovsdb-server &amp;#8211;remote=punix:/usr/local/var/run/openvswitch/db.sock &lt;br /&gt; &amp;#8211;remote=db:Open_vSwitch,Open_vSwitch,manager_options &lt;br /&gt; &amp;#8211;private-key=db:Open_vSwitch,SSL,private_key &lt;br /&gt; &amp;#8211;certificate=db:Open_vSwitch,SSL,certificate &lt;br /&gt; &amp;#8211;bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert &lt;br /&gt; &amp;#8211;pidfile &amp;#8211;detach
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;ovs-vsctl --no-wait init&lt;/code&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;code&gt;ovs-vswitchd --pidfile --detach&lt;/code&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;gre-tunnel-configuration&quot;&gt;GRE tunnel Configuration&lt;/h2&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Host1
+    &lt;ul&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br2&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br1 em1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig em1 0;dhclient br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig br2 10.1.1.1 netmask 255.255.255.0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br2 gre0 -- set interface gre0 type=gre options:remote_ip=192.168.1.252&lt;/code&gt;&lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+  &lt;li&gt;VM1
+    &lt;ul&gt;
+      &lt;li&gt;&lt;code&gt;virsh dumpxml kvm1 &amp;gt; domain.xml&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;search the XML &lt;code&gt;&amp;lt;interface type='network'&amp;gt;&lt;/code&gt; section and change it to something like this(see below):&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;virsh create domain.xml&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig eth3 up&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;
+        &lt;p&gt;&lt;code&gt;ifconfig eth3 10.1.1.20 netmask 255.255.255.0&lt;/code&gt;&lt;/p&gt;
+
+        &lt;pre&gt;&lt;code&gt;  &amp;lt;interface type=&amp;amp;#39;bridge&amp;amp;#39;&amp;gt;
+    &amp;lt;mac address=&amp;amp;#39;52:54:00:b8:27:75&amp;amp;#39;/&amp;gt;
+    &amp;lt;source bridge=&amp;amp;#39;br2&amp;amp;#39;/&amp;gt;
+    &amp;lt;virtualport type=&amp;amp;#39;openvswitch&amp;amp;#39;&amp;gt;
+    &amp;lt;/virtualport&amp;gt; 
+    &amp;lt;model type=&amp;amp;#39;virtio&amp;amp;#39;/&amp;gt; 
+    &amp;lt;address type=&amp;amp;#39;pci&amp;amp;#39; domain=&amp;amp;#39;0x0000&amp;amp;#39; bus=&amp;amp;#39;0x00&amp;amp;#39; slot=&amp;amp;#39;0x03&amp;amp;#39; function=&amp;amp;#39;0x0&amp;amp;#39;/&amp;gt; 
+  &amp;lt;/interface&amp;gt; 
+&lt;/code&gt;&lt;/pre&gt;
+
+        &lt;h1 id=&quot;ovs-vsctl-show&quot;&gt;ovs-vsctl show&lt;/h1&gt;
+        &lt;p&gt;390982aa-7bf6-4dfd-84eb-76fe7654e73d
+    Bridge “br2”
+    Port “vnet0”
+        Interface “vnet0”
+    Port “br2”
+        Interface “br2”
+        type: internal
+    Port “gre0”
+        Interface “gre0”
+        type: gre
+        options: {remote_ip=”192.168.1.252”}
+    Bridge “br1”
+    Port “br1”
+        Interface “br1”
+        type: internal
+    Port “em1”
+        Interface “em1”&lt;/p&gt;
+      &lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+  &lt;li&gt;Host2
+    &lt;ul&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-br br2&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br1 eth0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig em1 0;dhclient br1&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig br2 10.1.1.2 netmask 255.255.255.0&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ovs-vsctl add-port br2 gre0 -- set interface gre0 type=gre options:remote_ip=192.168.1.249&lt;/code&gt;&lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+  &lt;li&gt;VM2
+    &lt;ul&gt;
+      &lt;li&gt;redid the configuration as VM1&lt;/li&gt;
+      &lt;li&gt;&lt;code&gt;ifconfig eth5 up&lt;/code&gt;&lt;/li&gt;
+      &lt;li&gt;
+        &lt;p&gt;&lt;code&gt;ifconfig eth5 10.1.1.30 netmask 255.255.255.0&lt;/code&gt;&lt;/p&gt;
+
+        &lt;h1 id=&quot;ovs-vsctl-show-1&quot;&gt;ovs-vsctl show&lt;/h1&gt;
+        &lt;p&gt;66f0d773-a7c9-451e-980b-c2def85eda23
+    Bridge “br1”
+    Port “eth0”
+        Interface “eth0”
+    Port “br1”
+        Interface “br1”
+        type: internal
+    Bridge “br2”
+    Port “gre0”
+        Interface “gre0”
+        type: gre
+        options: {remote_ip=”192.168.1.249”}
+    Port “br2”
+        Interface “br2”
+        type: internal
+    Port “vnet0”
+        Interface “vnet0”&lt;/p&gt;
+      &lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4 id=&quot;test&quot;&gt;Test&lt;/h4&gt;
+
+&lt;p&gt;ping VM2 on VM1:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;    # ping 10.1.1.30
+    PING 10.1.1.30 (10.1.1.30) 56(84) bytes of data.
+    64 bytes from 10.1.1.30: icmp_seq=1 ttl=64 time=3.66 ms
+    64 bytes from 10.1.1.30: icmp_seq=2 ttl=64 time=1.82 ms
+    64 bytes from 10.1.1.30: icmp_seq=3 ttl=64 time=1.47 ms
+    64 bytes from 10.1.1.30: icmp_seq=4 ttl=64 time=1.64 ms
+    64 bytes from 10.1.1.30: icmp_seq=5 ttl=64 time=1.64 ms
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;capture the packets on VM2 at the same time:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;    # tcpdump -i eth5 -xxx    
+    08:24:38.425182 IP 10.1.1.20 &amp;gt; 10.1.1.30: ICMP echo request, id 53255, seq 1, length 64
+        0x0000:  5254 001b ead5 5254 00b8 2775 0800 4500
+        0x0010:  0054 0000 4000 4001 2476 0a01 0114 0a01
+        0x0020:  011e 0800 263f d007 0001 96f1 7852 0000
+        0x0030:  0000 2aa1 0900 0000 0000 1011 1213 1415
+        0x0040:  1617 1819 1a1b 1c1d 1e1f 2021 2223 2425
+        0x0050:  2627 2829 2a2b 2c2d 2e2f 3031 3233 3435
+        0x0060:  3637
+    08:24:38.425262 IP 10.1.1.30 &amp;gt; 10.1.1.20: ICMP echo reply, id 53255, seq 1, length 64
+        0x0000:  5254 00b8 2775 5254 001b ead5 0800 4500
+        0x0010:  0054 8ef0 0000 4001 d585 0a01 011e 0a01
+        0x0020:  0114 0000 2e3f d007 0001 96f1 7852 0000
+        0x0030:  0000 2aa1 0900 0000 0000 1011 1213 1415
+        0x0040:  1617 1819 1a1b 1c1d 1e1f 2021 2223 2425
+        0x0050:  2627 2829 2a2b 2c2d 2e2f 3031 3233 3435
+        0x0060:  3637
+    08:24:39.426066 IP 10.1.1.20 &amp;gt; 10.1.1.30: ICMP echo request, id 53255, seq 2, length 64
+        0x0000:  5254 001b ead5 5254 00b8 2775 0800 4500
+        0x0010:  0054 0000 4000 4001 2476 0a01 0114 0a01
+        0x0020:  011e 0800 d835 d007 0002 97f1 7852 0000
+        0x0030:  0000 77a9 0900 0000 0000 1011 1213 1415
+        0x0040:  1617 1819 1a1b 1c1d 1e1f 2021 2223 2425
+        0x0050:  2627 2829 2a2b 2c2d 2e2f 3031 3233 3435
+        0x0060:  3637
+    08:24:39.426135 IP 10.1.1.30 &amp;gt; 10.1.1.20: ICMP echo reply, id 53255, seq 2, length 64
+        0x0000:  5254 00b8 2775 5254 001b ead5 0800 4500
+        0x0010:  0054 8ef1 0000 4001 d584 0a01 011e 0a01
+        0x0020:  0114 0000 e035 d007 0002 97f1 7852 0000
+        0x0030:  0000 77a9 0900 0000 0000 1011 1213 1415
+        0x0040:  1617 1819 1a1b 1c1d 1e1f 2021 2223 2425
+        0x0050:  2627 2829 2a2b 2c2d 2e2f 3031 3233 3435
+        0x0060:  3637
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;ftrace debug:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;code&gt;cd /sys/kernel/debug/tracing&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;code&gt;echo &quot;iptunnel_xmit&quot; &amp;gt; set_ftrace_filter&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;code&gt;echo &quot;function_graph&quot; &amp;gt; current_tracer&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;code&gt;echo &quot;1&quot; &amp;gt; tracing_on&lt;/code&gt;&lt;/p&gt;
+
+    &lt;pre&gt;&lt;code&gt;# cat trace
+# tracer: function_graph
+#
+# CPU  DURATION                  FUNCTION CALLS
+# |     |   |                     |   |   |   |
+ 0) + 63.180 us   |  iptunnel_xmit [openvswitch]();
+ 0) + 29.963 us   |  iptunnel_xmit [openvswitch]();
+ 1) + 51.486 us   |  iptunnel_xmit [openvswitch]();
+ 2) + 49.981 us   |  iptunnel_xmit [openvswitch]();
+ ------------------------------------------
+ 0)  upcall_-1891  =&amp;gt;  vhost-2-2339 
+ ------------------------------------------
+
+ 0) + 11.770 us   |  iptunnel_xmit [openvswitch]();
+ 2) + 45.533 us   |  iptunnel_xmit [openvswitch]();
+ 2) + 48.497 us   |  iptunnel_xmit [openvswitch]();
+ 2) + 48.216 us   |  iptunnel_xmit [openvswitch]();
+ 2) + 48.348 us   |  iptunnel_xmit [openvswitch]();
+&lt;/code&gt;&lt;/pre&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Gre Tunnel 就介绍到这里，之后会简单的介绍下 LISP Tunnel 的配置过程&lt;/p&gt;
+
+&lt;h4 id=&quot;references&quot;&gt;References&lt;/h4&gt;
+
+&lt;ol style=&quot;list-style-type: decimal&quot;&gt;
+  &lt;li&gt;
+    &lt;a href=&quot;http://wangcong.org/blog/archives/2163&quot;&gt;http://wangcong.org/blog/archives/2163&lt;/a&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;a href=&quot;http://networkstatic.net/open-vswitch-gre-tunnel-configuration/&quot;&gt;http://networkstatic.net/open-vswitch-gre-tunnel-configuration/&lt;/a&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;</content><author><name>bluezd</name></author><summary type="html">Install</summary></entry><entry><title type="html">溃败</title><link href="http://0.0.0.0:4000/archives/686" rel="alternate" type="text/html" title="溃败" /><published>2013-08-26T20:59:00+08:00</published><updated>2013-08-26T20:59:00+08:00</updated><id>http://0.0.0.0:4000/archives/rout</id><content type="html" xml:base="http://0.0.0.0:4000/archives/686">&lt;p&gt;为了支持自己心爱的球队，冒着挨揍的危险毅然决然的买了张主席台附近的票．&lt;/p&gt;
+
+&lt;p&gt;周日很早就来到了工体，在周围徘徊了几圈后居然没有发现一个客队球迷，稍有些失望．但是当我进入体育场的时候发现他们早已经入场了，整齐划一静静的等待着比赛的开始．他们都是不远千里赶过来加油的(终于发现比我还”傻”的人了)，可是在我眼里他们真的很可爱！&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_122756.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_122756-225x300.jpg&quot; alt=&quot;IMG_20130826_122756&quot; width=&quot;225&quot; height=&quot;300&quot; class=&quot;aligncenter size-medium wp-image-687&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_122756-225x300.jpg 225w, http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_122756-768x1024.jpg 768w&quot; sizes=&quot;(max-width: 225px) 100vw, 225px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;北京的球市真的很好，上座率很高．他们衣装整齐口号整齐且响亮，无论男女老少都可以参与进来，把整个工体汇成了一片绿色的海洋，而我却显得那么的多余和渺小．国安有这么一群痴心的球迷，你们真的很幸福啊！&lt;/p&gt;
+
+&lt;p&gt;比赛很快就失去了悬念，两队的真实差距绝对不是比分体现的那样．关于比赛的公平性以及那两个点球的判罚我不想说，因为首先你们没有踢出自己的东西，毫无斗志，在球场上唯一能让人信服的就是进球.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123408.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123408-300x225.jpg&quot; alt=&quot;IMG_20130826_123408&quot; width=&quot;300&quot; height=&quot;225&quot; class=&quot;aligncenter size-medium wp-image-688&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123408-300x225.jpg 300w, http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123408-1024x768.jpg 1024w&quot; sizes=&quot;(max-width: 300px) 100vw, 300px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123209.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123209-300x225.jpg&quot; alt=&quot;IMG_20130826_123209&quot; width=&quot;300&quot; height=&quot;225&quot; class=&quot;aligncenter size-medium wp-image-690&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123209-300x225.jpg 300w, http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123209-1024x768.jpg 1024w&quot; sizes=&quot;(max-width: 300px) 100vw, 300px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;落寞的我和周围得意并且语气中夹杂着侮辱的北京球迷形成了鲜明的对比．望着远处的阿尔滨球迷和记分牌我的眼神中充满着孤独，迷茫与失望，我们明明近在咫尺却不能在一起，此情此景让我联想到了现实中的我 ……&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123025.jpg&quot; class=&quot;highslide-image&quot; onclick=&quot;return hs.expand(this);&quot;&gt;&lt;img src=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123025-300x224.jpg&quot; alt=&quot;IMG_20130826_123025&quot; width=&quot;300&quot; height=&quot;224&quot; class=&quot;aligncenter size-medium wp-image-689&quot; srcset=&quot;http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123025-300x224.jpg 300w, http://www.bluezd.info/wp-content/uploads/2013/08/IMG_20130826_123025-1024x767.jpg 1024w&quot; sizes=&quot;(max-width: 300px) 100vw, 300px&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;输&lt;/strong&gt;并不可怕，可怕的是明明知道自己的不足却不去努力改正．阿尔滨让我们一起努力，国安明年金州见！&lt;/p&gt;</content><author><name>bluezd</name></author><category term="life" /><summary type="html">为了支持自己心爱的球队，冒着挨揍的危险毅然决然的买了张主席台附近的票．</summary></entry><entry><title type="html">Welcome to Houston Rockets, Dwight Howard !</title><link href="http://0.0.0.0:4000/archives/658" rel="alternate" type="text/html" title="Welcome to Houston Rockets, Dwight Howard !" /><published>2013-07-07T05:25:01+08:00</published><updated>2013-07-07T05:25:01+08:00</updated><id>http://0.0.0.0:4000/archives/dwight-howard</id><content type="html" xml:base="http://0.0.0.0:4000/archives/658">&lt;p&gt;从姚明刚进入NBA的那时候起我就开始关注了，被那种激烈的身体对抗，扣篮，盖帽，以及绝杀深深的吸引了，渐渐的喜欢&lt;/p&gt;
+
+&lt;p&gt;上休斯顿火箭队并且成为一名忠实的火箭粉丝．从弗老大老猫到麦迪，Yao 身边换了无数个队友，可是却始终没有换来一个总冠军，最好的成绩才是突破了&lt;/p&gt;
+
+&lt;p&gt;季后赛首轮．看了火箭这么些年球，快乐过，痛苦过，甚至绝望过！快乐是火箭赢球并打出精彩的比赛，痛苦是一到关键时候就手软被绝杀，见过了太多&lt;/p&gt;
+
+&lt;p&gt;被绝杀的比赛_(Roy 0.8s 的三分是绝杀中的经典)_总是感慨为什么火箭总被绝杀，难道是麦迪那次35秒13分用光了火箭这几年所有的运气？绝望的&lt;/p&gt;
+
+&lt;p&gt;是经理的碌碌无为，每年的休赛期莫雷那个胖子总是吵吵着要签这个交易那个球星，可是每年都是竹篮打水一场空，这对于球迷来说是难以接受的，对这只&lt;/p&gt;
+
+&lt;p&gt;球队感到绝望因为看不到任何希望！后来 Yao 退役了，伤心，因为他很努力却没有赢得总冠军，正如他说的_“努力不一定成功，但放弃一定失败”_，但是我觉得他仍然很成功，因为他影响了像我一样的一批人，这一点谁也做不到！在他退役后我决定不再关注火箭队，但是我发现我做不到，难道这就是爱？&lt;/p&gt;
+
+&lt;p&gt;总之就是从看NBA比赛中寻找激情，快乐，回忆，以及人生的感悟．其实人生就像一场四节比赛，我的第一节已经结束仿佛已经进入了垃圾时间，不舍求翻盘&lt;/p&gt;
+
+&lt;p&gt;只盼少输一点！忘不了高中的时候下课玩命的往篮球场跑的情景，也忘不了与同学们畅聊 NBA 的情景，更忘不了为了看场火箭比赛而逃课被班主任臭骂的情景 … 那个时候的生活是痛并快乐着，很是怀念！可是岁月却是残酷的，后来终于在眼泪中明白，有些东西或人一旦错过永远都不会再回来 ……&lt;/p&gt;
+
+&lt;p&gt;Damn it，我这是说哪去了？&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;http://i3.sinaimg.cn/ty/nba/2013-07-06/U4934P6T12D6656772F44DT20130706105515.jpg&quot; width=&quot;450&quot; height=&quot;452&quot; class=&quot;aligncenter&quot; /&gt;&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;言归正传，&lt;strong&gt;Dwight Howard&lt;/strong&gt; 欢迎加入休斯顿火箭 ! 莫雷干的漂亮，终于没有让火箭迷们再次失望，同时特别感谢一下科比 :D．&lt;/p&gt;
+
+&lt;p&gt;知道这两天魔兽会作出最终决定，早上醒来看了新闻又看了twitter， 貌似搞定，下午终于尘埃落定了，作为火箭迷真的很高兴，很高兴！可是恕我直言&lt;/p&gt;
+
+&lt;p&gt;即使弄来魔兽这阵容也不足以拿总冠军，季后赛想从西部的乱军中杀出重围仍然很难，雷霆，马刺，快船都是不好弄的主，东部还有卫冕冠军热火_(篮网的阵容太不要脸了)&lt;em&gt;．火箭4号位上仍然是软肋，所以还需一个人，如果能搞定约什史密斯的话，在外线再配置几个火炮，最后签约个老将&lt;/em&gt;(加西&lt;/p&gt;
+
+&lt;p&gt;亚之类的)&lt;em&gt;，我觉得这就差不多了，就这内线的实力，谁不害怕！我始终认为得内线者得天下&lt;/em&gt;(热火除外，因为他们有詹姆斯，这就是我不喜欢的&amp;gt;热火的原因，毁了我的三观)_ ！&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;作为火箭球迷今天是值得高兴的一天，期待莫雷给我们更多的惊喜，祝愿哈登，魔兽_(霍哈哈组合)_早日率领火箭问鼎总冠军！！&lt;/p&gt;</content><author><name>bluezd</name></author><category term="life" /><summary type="html">从姚明刚进入NBA的那时候起我就开始关注了，被那种激烈的身体对抗，扣篮，盖帽，以及绝杀深深的吸引了，渐渐的喜欢 上休斯顿火箭队并且成为一名忠实的火箭粉丝．从弗老大老猫到麦迪，Yao 身边换了无数个队友，可是却始终没有换来一个总冠军，最好的成绩才是突破了 季后赛首轮．看了火箭这么些年球，快乐过，痛苦过，甚至绝望过！快乐是火箭赢球并打出精彩的比赛，痛苦是一到关键时候就手软被绝杀，见过了太多 被绝杀的比赛_(Roy 0.8s 的三分是绝杀中的经典)_总是感慨为什么火箭总被绝杀，难道是麦迪那次35秒13分用光了火箭这几年所有的运气？绝望的 是经理的碌碌无为，每年的休赛期莫雷那个胖子总是吵吵着要签这个交易那个球星，可是每年都是竹篮打水一场空，这对于球迷来说是难以接受的，对这只 球队感到绝望因为看不到任何希望！后来 Yao 退役了，伤心，因为他很努力却没有赢得总冠军，正如他说的_“努力不一定成功，但放弃一定失败”_，但是我觉得他仍然很成功，因为他影响了像我一样的一批人，这一点谁也做不到！在他退役后我决定不再关注火箭队，但是我发现我做不到，难道这就是爱？</summary></entry><entry><title type="html">Kernel Thread 的创建</title><link href="http://0.0.0.0:4000/archives/447" rel="alternate" type="text/html" title="Kernel Thread 的创建" /><published>2013-04-03T07:28:03+08:00</published><updated>2013-04-03T07:28:03+08:00</updated><id>http://0.0.0.0:4000/archives/kernel-thread-%E7%9A%84%E5%88%9B%E5%BB%BA</id><content type="html" xml:base="http://0.0.0.0:4000/archives/447">&lt;p&gt;在 Linux 中有很多的内核线程，可以通过 &lt;code&gt;ps&lt;/code&gt; command 查看到，比如: &lt;em&gt;kthreadd&lt;/em&gt; &lt;em&gt;ksoftirqd&lt;/em&gt; &lt;em&gt;watchdog&lt;/em&gt; 等等等 … 它们都是由内核从无到有创建的，通过它们的 pid 以及 ppid 可以得出以下几点:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;在内核初始化 &lt;code&gt;rest_init&lt;/code&gt; 函数中，由进程 0 (swapper 进程)创建了两个 process &amp;lt;ol style=&quot;list-style-type: decimal;&quot;&amp;gt;
+    &lt;li&gt;
+    &lt;em&gt;init&lt;/em&gt; 进程 &lt;em&gt;(pid = 1, ppid = 0)&lt;/em&gt;
+  &lt;/li&gt;
+    &lt;li&gt;
+    &lt;strong&gt;kthreadd&lt;/strong&gt; &lt;em&gt;(pid = 2, ppid = 0)&lt;/em&gt;
+  &lt;/li&gt;
+    &lt;p&gt;&amp;lt;/ol&amp;gt;&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;所有其它的内核线程的 ppid 都是 2，也就是说它们都是由 &lt;strong&gt;kthreadd&lt;/strong&gt; thread 创建的&lt;/li&gt;
+  &lt;li&gt;所有的内核线程在大部分时间里都处于阻塞状态(TASK_INTERRUPTIBLE)只有在系统满足进程需要的某种资源的情况下才会运行&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;创建一个内核 thread 的接口函数是:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;kthread_create()
+kthread_run()
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;&lt;em&gt;这两个函数的区别就是 &lt;code&gt;kthread_run()&lt;/code&gt; 函数中封装了前者，由 &lt;code&gt;kthread_create()&lt;/code&gt; 创建的 thread 不会立即运行，而后者创建的 thread 会立刻运行，原因是在 &lt;code&gt;kthread_run()&lt;/code&gt; 中调用了 &lt;code&gt;wake_up_process()&lt;/code&gt;.用什么函数看你自己的需求，如果你要让你创建的 thread 运行在指定的 cpu 上那必须用前者(因为它创建的 thread 不会运行)，然后再用 &lt;code&gt;kthread_bind()&lt;/code&gt; 完成绑定，最后 wake up.&lt;/em&gt;&lt;/p&gt;
+
+&lt;hr /&gt;
+
+&lt;p&gt;下面就大概说一下内核 thread 创建的过程.&lt;/p&gt;
+
+&lt;h2 id=&quot;kthreadd&quot;&gt;kthreadd&lt;/h2&gt;
+
+&lt;pre&gt;&lt;code&gt;rest_init()
+{
+    pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
+    kthreadd_task = find_task_by_pid(pid);
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h2 id=&quot;kernel-thread&quot;&gt;kernel thread&lt;/h2&gt;
+
+&lt;p&gt;&lt;code&gt;kthread_create(usb_stor_control_thread, us, &quot;usb-storage&quot;)&lt;/code&gt;&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;struct task_struct *kthread_create(int (*threadfn)(void *data),
+                               void *data,
+                               const char namefmt[],
+                               ...)
+{
+
+    struct kthread_create_info create;
+
+    create.threadfn = threadfn;
+    新创建的线程运行的函数
+    create.data = data;
+    init_completion(&amp;amp;create.done);
+    初始化一个 completion 用于一个线程告诉其它线程某个工作已经完成
+
+    spin_lock(&amp;amp;kthread_create_lock);
+    list_add_tail(&amp;amp;create.list, &amp;amp;kthread_create_list);
+    加到待创建 thread list 中去
+    spin_unlock(&amp;amp;kthread_create_lock);
+
+    wake_up_process(kthreadd_task);
+    唤醒 kthreadd 线程来创建新的内核线程 
+    wait_for_completion(&amp;amp;create.done);
+    等待新的线程创建完毕(睡眠在等待队列中)
+
+    ......
+
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;kthreadd 是一个死循环，大部分时间在睡眠，只有创建内核线程时才被唤醒.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;int kthreadd(void *unused)
+{
+    关注循环体
+
+        for (;;) {
+            set_current_state(TASK_INTERRUPTIBLE);
+            if (list_empty(&amp;amp;kthread_create_list))
+                    schedule();
+            首先将线程状态设置为 TASK_INTERRUPTIBLE, 如果当前
+            没有要创建的线程则主动放弃 CPU 完成调度.此进程变为阻塞态
+
+            __set_current_state(TASK_RUNNING);
+            运行到此表示 kthreadd 线程被唤醒(就是我们当前)
+            设置进程运行状态为 TASK_RUNNING
+
+            spin_lock(&amp;amp;kthread_create_lock);
+
+            while (!list_empty(&amp;amp;kthread_create_list)) {
+                    struct kthread_create_info *create;
+
+                    create = list_entry(kthread_create_list.next,
+                                        struct kthread_create_info, list);
+                    从链表中取得 kthread_create_info 结构的地址，在上文中已经完成插入操作(将
+                    kthread_create_info 结构中的 list 成员加到链表中，此时根据成员 list 的偏移
+                    获得 create)  
+
+                    list_del_init(&amp;amp;create-&amp;gt;list);
+                    取出后从列表删除
+                    spin_unlock(&amp;amp;kthread_create_lock);
+
+                    create_kthread(create);
+                    完成真正线程的创建
+
+                    spin_lock(&amp;amp;kthread_create_lock);
+            }
+
+            spin_unlock(&amp;amp;kthread_create_lock);
+       }
+
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;create_kthread 函数完成真正线程的创建&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;static void create_kthread(struct kthread_create_info *create)
+{       
+    int pid;
+
+    pid = kernel_thread(kthread, create, CLONE_FS | CLONE_FILES | SIGCHLD);
+    其实就是调用首先构造一个假的上下文执行环境，最后调用 do_fork()
+    返回进程 id, 创建后的线程执行 kthread 函数
+    if (pid &amp;lt; 0) {
+            create-&amp;gt;result = ERR_PTR(pid);
+            complete(&amp;amp;create-&amp;gt;done);
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;此时回到 kthreadd thread,它在完成了进程的创建后继续循环，检查 kthread_create_list 链表，如果为空，则 kthreadd 内核线程昏睡过去 ……&lt;/p&gt;
+
+&lt;p&gt;当前有三个线程:&lt;/p&gt;
+
+&lt;ol style=&quot;list-style-type: decimal;&quot;&gt;
+  &lt;li&gt;
+    kthreadd thread 已经光荣完成使命，睡眠
+  &lt;/li&gt;
+  &lt;li&gt;
+    唤醒 kthreadd 的线程由于新创建的线程还没有创建完毕而继续睡眠 &lt;em&gt;(在 kthread_create 函数中)&lt;/em&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    新创建的线程已经正在运行 &lt;code&gt;kthread&lt;/code&gt;，但是由于还有其它工作没有做所以还没有最终创建完成.
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;新创建的线程 kthread 函数&lt;/p&gt;
+
+&lt;pre class=&quot;brush: cpp; title: ; notranslate&quot; title=&quot;&quot;&gt;static int kthread(void *_create)
+{
+    struct kthread_create_info *create = _create;
+    // create 指向 kthread_create_info 中的 kthread_create_info
+    int (*threadfn)(void *data) = create-&amp;gt;threadfn;
+    // 新的线程创建完毕后执行的函数
+    void *data = create-&amp;gt;data;
+    struct kthread self;
+    int ret;
+
+    self.should_stop = 0;
+    // 在 kthread_should_stop() 函数中会检查这个值,表示当前线程是否
+    // 运行结束. kthread_should_stop() 常被用于线程函数中.
+    init_completion(&amp;amp;self.exited);
+    current-&amp;gt;vfork_done = &amp;self.exited;
+
+    /* OK, tell user we're spawned, wait for stop or wakeup */
+    __set_current_state(TASK_UNINTERRUPTIBLE);
+    // 设置运行状态为 TASK_UNINTERRUPTIBLE
+    create-&amp;gt;result = current;
+    // current 表示当前新创建的 thread 的 task_struct 结构
+    complete(&amp;amp;create-&amp;gt;done);
+    // new thread 创建完毕
+
+    schedule();
+    // 执行任务切换，让出 CPU
+
+    ......
+
+}
+&lt;/pre&gt;
+
+&lt;p&gt;线程创建完毕:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;创建新 thread 的进程恢复运行 &lt;code&gt;kthread_create()&lt;/code&gt; 并且返回新创建线程的任务描述符&lt;/li&gt;
+  &lt;li&gt;新创建的线程由于执行了 &lt;code&gt;schedule()&lt;/code&gt; 调度，此时并没有执行.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;最后唤醒新创建的线程 :&lt;/p&gt;
+
+&lt;pre&gt;&lt;span style=&quot;color: #0000ff;&quot;&gt;&lt;code&gt;wake_up_process(p);&lt;/code&gt;&lt;/span&gt;&lt;/pre&gt;
+
+&lt;p&gt;当线程被唤醒后，继续 &lt;code&gt;kthread()&lt;/code&gt;&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;    ret = -EINTR;
+    if (!self.should_stop)
+            ret = &amp;lt;span style=&quot;color: #ff0000;&quot;&amp;gt;threadfn&amp;lt;/span&amp;gt;(data);
+    执行相应的线程函数
+
+    do_exit(ret);
+    最后退出
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h2 id=&quot;总结-总结&quot;&gt;总结 {#总结}&lt;/h2&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;任何一个内核线程入口都是 &lt;code&gt;kthread()&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;通过 &lt;code&gt;kthread_create()&lt;/code&gt; 创建的内核线程不会立刻运行．需要手工 wake up.&lt;/li&gt;
+  &lt;li&gt;通过 &lt;code&gt;kthread_create()&lt;/code&gt; 创建的内核线程有可能不会执行相应线程函数&lt;code&gt;threadfn&lt;/code&gt;而直接退出&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;最后写了一个创建内核线程的模块仅供参考:&lt;/p&gt;
+
+&lt;pre class=&quot;brush: cpp; title: ; notranslate&quot; title=&quot;&quot;&gt;#include &amp;lt;linux/init.h&amp;gt;
+#include &amp;lt;linux/time.h&amp;gt;
+#include &amp;lt;linux/errno.h&amp;gt;
+#include &amp;lt;linux/module.h&amp;gt;
+#include &amp;lt;linux/sched.h&amp;gt;
+#include &amp;lt;linux/kthread.h&amp;gt;
+#include &amp;lt;linux/cpumask.h&amp;gt;
+
+#define sleep_millisecs 1000*60
+
+static int thread(void *arg)
+{
+	long ns1, ns2, delta;
+	unsigned int cpu;
+	struct timespec ts1, ts2;
+
+	cpu = *((unsigned int *)arg);
+
+	printk(KERN_INFO &quot;### [thread/%d] test start \n&quot;, cpu);
+
+	while (!kthread_should_stop()) {
+                /*
+                 * Do What you want
+                 */
+		schedule_timeout_interruptible(
+				msecs_to_jiffies(1));
+	}
+
+	printk(KERN_INFO &quot;### [thread/%d] test end \n&quot;, cpu);
+
+	return 0;
+}
+
+static int __init XXXX(void)
+{
+	int cpu;
+	unsigned int cpu_count = num_online_cpus();
+	unsigned int parameter[cpu_count];
+	struct task_struct *t_thread[cpu_count];
+
+	for_each_present_cpu(cpu){
+		parameter[cpu] = cpu;
+
+		t_thread[cpu] = kthread_create(thread, (void *) (parameter+cpu), &quot;thread/%d&quot;, cpu);
+
+		if (IS_ERR(t_thread[cpu])) {
+			printk(KERN_ERR &quot;[thread/%d]: creating kthread failed\n&quot;, cpu);
+
+			goto out;
+		}
+
+		kthread_bind(t_thread[cpu], cpu);
+		wake_up_process(t_thread[cpu]);
+	}
+
+	schedule_timeout_interruptible(
+			msecs_to_jiffies(sleep_millisecs));
+
+	for (cpu = 0; cpu &amp;lt; cpu_count; cpu++) {
+		kthread_stop(t_thread[cpu]);
+	}
+
+out:
+	return 0;
+}
+
+static void __exit XXXX_exit(void)
+{
+}
+
+module_init(XXXX);
+module_exit(XXXX_exit);
+
+MODULE_LICENSE(&quot;GPL&quot;);
+MODULE_AUTHOR(&quot;bluezd&quot;);
+MODULE_DESCRIPTION(&quot;Kernel study&quot;);
+&lt;/pre&gt;</content><author><name>bluezd</name></author><category term="general" /><category term="kernel" /><category term="process" /><summary type="html">在 Linux 中有很多的内核线程，可以通过 ps command 查看到，比如: kthreadd ksoftirqd watchdog 等等等 … 它们都是由内核从无到有创建的，通过它们的 pid 以及 ppid 可以得出以下几点:</summary></entry></feed>

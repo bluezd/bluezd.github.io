@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>本地时钟事件设备的注册</title>
+  <meta name="description" content="话说上一回合已经完成了Global事件设备(hpet)的注册,现在来看下Local时钟事件的注册，就以 CPU0 为例.">
+
+  <link rel="stylesheet" href="/assets/main.css">
+  <link rel="canonical" href="http://0.0.0.0:4000/archives/284">
+  <link rel="alternate" type="application/rss+xml" title="Bluezd&#39;s Home" href="/feed.xml">
+  
+  
+</head>
+
+
+  <body>
+
+    <header class="site-header" role="banner">
+
+  <div class="wrapper">
+    
+    
+    <a class="site-title" href="/">Bluezd&#39;s Home</a>
+   <div class="footer-col footer-col-1">
+         <p>Stay Focused ~ Stay Positive</p>
+    </div>
+  
+    
+      <nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+              <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+              <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger">
+          
+            
+            
+          
+            
+            
+            <a class="page-link" href="/about/about.html">About</a>
+            
+          
+            
+            
+          
+            
+            
+          
+            
+            
+          
+        </div>
+
+      </nav>
+    
+  </div>
+</header>
+
+
+    <main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title" itemprop="name headline">本地时钟事件设备的注册</h1>
+    <p class="post-meta">
+      <time datetime="2012-03-19T04:02:54+08:00" itemprop="datePublished">
+        
+        Mar 19, 2012
+      </time>
+      
+        • <span itemprop="author" itemscope itemtype="http://schema.org/Person"><span itemprop="name">bluezd</span></span>
+      </p>
+  </header>
+
+  <div class="post-content" itemprop="articleBody">
+    <p><strong><font size="2">话说上一回合已经完成了Global事件设备(hpet)的注册,现在来看下Local时钟事件的注册，就以 CPU0 为例.</font></strong></p>
+
+<p>在 kernel 初始化的末期，内核线程 1 中(还没有 up 其他 cpu),在 log 中出现了类似“CPU0: Intel(R) Xeon(TM) CPU 3.20GHz stepping 04”，发生了这样一个故事……</p>
+
+<font size="3">局部时钟事件设备的注册</font>
+
+<p>`&lt;/p&gt;</p>
+<pre>kernel_init()
+  -&gt; smp_prepare_cpus(setup_max_cpus)
+     native_smp_prepare_cpus(64)
+       -&gt; x86_init.timers.setup_percpu_clockev()
+          setup_boot_APIC_clock()
+            -&gt; setup_APIC_timer()
+                 -&gt; clockevents_register_device(levt)`</pre>
+
+<p> </p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">static void __cpuinit setup_APIC_timer(void)
+{
+        struct clock_event_device *levt = &amp;__get_cpu_var(lapic_events);
+
+        if (cpu_has(&amp;current_cpu_data, X86_FEATURE_ARAT)) {
+                lapic_clockevent.features &amp;= ~CLOCK_EVT_FEAT_C3STOP;
+                /* Make LAPIC timer preferrable over percpu HPET */
+                lapic_clockevent.rating = 150;
+        }
+
+        memcpy(levt, &amp;lapic_clockevent, sizeof(*levt));
+        levt-&gt;cpumask = cpumask_of(smp_processor_id());
+
+        clockevents_register_device(levt);
+        // 注册 CPU0 Local Clock Event Device
+}
+</pre>
+
+<p> </p>
+
+<p>`&lt;/p&gt;</p>
+<pre>
+ +----------------------------------------------------------------------------------+
+ |      /*                                                                          |
+ |       * The local apic timer can be used for any function which is CPU local.    |
+ |       */                                                                         |
+ |      static struct clock_event_device lapic_clockevent = {                       |
+ |              .name           = "lapic",                                          |
+ |              .features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT  |
+ |                              | CLOCK_EVT_FEAT_C3STOP | CLOCK_EVT_FEAT_DUMMY,     |
+ |              .shift          = 32,                                               |
+ |              .set_mode       = lapic_timer_setup,                                |
+ |              .set_next_event = lapic_next_event,                                 |
+ |              .broadcast      = lapic_timer_broadcast,                            |
+ |              .rating         = 100,                                              |
+ |              .irq            = -1,                                               |
+ |      };                                                                          |
+ |                                                                                  |
+ +----------------------------------------------------------------------------------+
+` </pre>
+
+<p> </p>
+
+<p><em>故事从这里就又开始了</em></p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">void clockevents_register_device(struct clock_event_device *dev)
+{
+        // dev=&amp;lapic_clockevent
+ 
+        unsigned long flags;
+ 
+        BUG_ON(dev-&gt;mode != CLOCK_EVT_MODE_UNUSED);
+        BUG_ON(!dev-&gt;cpumask);
+        // 此时设备必须绑定到某个 CPU 上，此时还是 cpu0
+ 
+        spin_lock_irqsave(&amp;clockevents_lock, flags);
+ 
+        list_add(&amp;dev-&gt;list, &amp;clockevent_devices);
+        // 加入到 clockevent_devices 链表中,跟时钟源的注册很像，只要注意以下插入链表的方式就好
+ 
+        clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
+ 
+        clockevents_notify_released();
+        // 当 Global Clock Event Device 注册完 hpet 和 cpu0 注册 lapic 之后会被调用.
+ 
+        spin_unlock_irqrestore(&amp;clockevents_lock, flags);
+}
+
+        ......
+
+static int tick_check_new_device(struct clock_event_device *newdev)
+{
+        ......
+
+        cpu = smp_processor_id();
+        // 还是 CPU0
+        if (!cpumask_test_cpu(cpu, newdev-&gt;cpumask))
+                goto out_bc;
+        // cpumask:            cpumask to indicate for which CPUs this device works
+
+        td = &amp;per_cpu(tick_cpu_device, cpu);
+        // 还是 CPU0 的那个 struct tick_device 实例
+
+        curdev = td-&gt;evtdev;
+        // 注意此时 curdev 并不是 NULL 而是指向 hpet_clockevent
+
+        ......
+
+        if (curdev) {
+                // curdev = &amp;hpet_clockevent
+                // newdev = &amp;lapic_clockevent
+
+                /*
+                 * Prefer one shot capable devices !
+                 */
+                if ((curdev-&gt;features &amp; CLOCK_EVT_FEAT_ONESHOT) &amp;&amp;
+                    !(newdev-&gt;features &amp; CLOCK_EVT_FEAT_ONESHOT))
+                        goto out_bc;
+                /*
+                 * Check the rating
+                 */
+                if (curdev-&gt;rating &gt;= newdev-&gt;rating)
+                        goto out_bc;
+
+                // lapic rating = 100,hpet rating = 50 
+
+                // 此处需要说明一下：一个 CPU 的一个 tick_device 只能对应一个 clock event device ,但是此时由于 CPU0 的 tick_device 上已经有了用作 global event device 的 hpet,所以此时就应该确定一下要选哪个根据 clcok event device 是否支持 one-shot mode 和 rating 值,此时顺序执行。
+        }
+
+        /*
+         * Replace the eventually existing device by the new
+         * device. If the current device is the broadcast device, do
+         * not give it back to the clockevents layer !
+         */
+        if (tick_is_broadcast_device(curdev)) {
+                clockevents_shutdown(curdev);
+                curdev = NULL;
+        }
+
+        clockevents_exchange_device(curdev, newdev);
+
+        tick_setup_device(td, newdev, cpu, cpumask_of(cpu));
+        // 设置 lapic_clockevent 的 event_handler 为 tick_handle_periodic
+
+        ......        
+
+        return NOTIFY_STOP;
+
+out_bc:
+        /*
+         * Can the new device be used as a broadcast device ?
+         */
+        if (tick_check_broadcast_device(newdev))
+                ret = NOTIFY_STOP;
+
+        spin_unlock_irqrestore(&amp;tick_device_lock, flags);
+
+        return ret;
+}
+</pre>
+
+<p> </p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">static void tick_setup_device(struct tick_device *td,
+                              struct clock_event_device *newdev, int cpu,
+                              const struct cpumask *cpumask)
+{
+        ......
+        
+        // 回到前文留下伏笔的 else
+        else {
+                handler = td-&gt;evtdev-&gt;event_handler;
+                // handler 应该为 tick_handle_periodic
+
+                next_event = td-&gt;evtdev-&gt;next_event;
+                td-&gt;evtdev-&gt;event_handler = clockevents_handle_noop;
+                // 设置 hpet_clockevent 的 event_handler 为 clockevents_handle_noop.
+        }
+
+        ......
+}
+
+</pre>
+
+<p> </p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">void clockevents_exchange_device(struct clock_event_device *old,
+                                 struct clock_event_device *new)
+{
+        // old = hpet
+        // new = lapic
+ 
+        unsigned long flags;
+ 
+        local_irq_save(flags);
+        /*
+         * Caller releases a clock event device. We queue it into the
+         * released list and do a notify add later.
+         */
+        if (old) {
+                clockevents_set_mode(old, CLOCK_EVT_MODE_UNUSED);
+                // 设置为 UNUSED mode
+                list_del(&amp;old-&gt;list);
+                // 从原来的 clockevent_devices 中删除
+                list_add(&amp;old-&gt;list, &amp;clockevents_released);
+                // 加到 clockevents_released 链表中
+        }
+ 
+        if (new) {
+                BUG_ON(new-&gt;mode != CLOCK_EVT_MODE_UNUSED);
+                clockevents_shutdown(new);
+        }
+        local_irq_restore(flags);
+}
+</pre>
+
+<p> </p>
+
+<p>好了，现在回到了 clockevents_register_device() 中的 clockevents_notify_released() 函数。</p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">static void clockevents_notify_released(void)
+{
+        struct clock_event_device *dev;
+
+        while (!list_empty(&amp;clockevents_released)) {
+                // 为空 list_empty 返回 1,如果 clockevents_released 链表不为空则进入循环
+                // 现在链表中的设备为 hpet
+
+                dev = list_entry(clockevents_released.next,
+                                 struct clock_event_device, list);
+                // dev 指向 hpet_clockevent  
+
+                list_del(&amp;dev-&gt;list);
+                list_add(&amp;dev-&gt;list, &amp;clockevent_devices);
+                // 再次加入到 clockevent_devices 链表
+                clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
+                // 再次设置 event_handler
+        }
+        // 在注册 global clock_event device 时因为 clockevents_released 链表为空，根本就没有进入循环体，但是现在不一样了。
+}
+</pre>
+
+<p> </p>
+
+<p><em>故事从这又 TMD 的开始了……</em></p>
+
+<p><strong>现在 CPU0 的 tick_device 上的 clock_event device 是 local 的 (lapic_clockevent),现在就是要处理全局的～</strong></p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">static int tick_check_new_device(struct clock_event_device *newdev)
+{
+        ......
+
+        cpu = smp_processor_id();
+        // 还是 CPU0
+        if (!cpumask_test_cpu(cpu, newdev-&gt;cpumask))
+                goto out_bc;
+        // cpumask:            cpumask to indicate for which CPUs this device works
+
+        td = &amp;per_cpu(tick_cpu_device, cpu);
+        // 还是 CPU0 的那个 struct tick_device 实例
+
+        curdev = td-&gt;evtdev;
+        // 注意此时 curdev 并不是 NULL 而是指向 lapic_clockevent
+
+        ......
+
+        if (curdev) {
+                // curdev = &amp;lapic_clockevent
+                // newdev = &amp;hpet_clockevent
+
+                /*
+                 * Prefer one shot capable devices !
+                 */
+                if ((curdev-&gt;features &amp; CLOCK_EVT_FEAT_ONESHOT) &amp;&amp;
+                    !(newdev-&gt;features &amp; CLOCK_EVT_FEAT_ONESHOT))
+                        goto out_bc;
+                /*
+                 * Check the rating
+                 */
+                if (curdev-&gt;rating &gt;= newdev-&gt;rating)
+                        goto out_bc;
+                        // 没办法只能去检查 hpet_clockevent 能否用作 broadcast device，因为它的 rating 值小于已经注册上的 lapic_clockevent
+
+                // lapic rating = 100,hpet rating = 50 
+                
+        }
+
+        ......
+
+out_bc:
+        /*
+         * Can the new device be used as a broadcast device ?
+         */
+        if (tick_check_broadcast_device(newdev))
+                ret = NOTIFY_STOP;
+
+        spin_unlock_irqrestore(&amp;tick_device_lock, flags);
+
+        return ret;
+}
+</pre>
+
+<p> </p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">int tick_check_broadcast_device(struct clock_event_device *dev)
+{
+        if ((tick_broadcast_device.evtdev &amp;&amp;
+             tick_broadcast_device.evtdev-&gt;rating &gt;= dev-&gt;rating) ||
+             (dev-&gt;features &amp; CLOCK_EVT_FEAT_C3STOP))
+                return 0;
+
+        clockevents_exchange_device(NULL, dev);
+
+        tick_broadcast_device.evtdev = dev;
+        // tick_broadcast_device 终于出现了，设置为 hpet
+
+        if (!cpumask_empty(tick_get_broadcast_mask()))
+                tick_broadcast_start_periodic(dev);
+                // 设置周期模式，此函数在当前 context 中并没有被执行，也就是说 hpet_clockevent 的 event_handler 应该是 "clockevents_handle_noop"
+        return 1;
+}
+</pre>
+
+<p> </p>
+
+<p>好现现在说说现在所处的situation，Global 以及 CPU0 的 LAPIC 都已经注册完毕，假设系统 4-core,现在处于 kernel 初始化末期线程1中，马上要进行的是启动其他额外 CPU（1-3）,并且注册相应的 LAPIC clock_event device.</p>
+
+<pre class="brush: cpp; title: ; notranslate" title="">kernel_init()
+  -&gt; smp_init()
+
+static void __init smp_init(void)
+{       
+        unsigned int cpu;
+        
+        /* FIXME: This should be done in userspace --RR */
+        for_each_present_cpu(cpu) {
+                if (num_online_cpus() &gt;= setup_max_cpus)
+                        break;
+                if (!cpu_online(cpu))
+                        cpu_up(cpu);
+        }
+        // 启动其他 CPU 调用 start_secondary()
+                
+        /* Any cleanup work */
+        printk(KERN_INFO "Brought up %ld CPUs\n", (long)num_online_cpus()); 
+        smp_cpus_done(setup_max_cpus);
+                
+        ......
+}
+</pre>
+
+<p> </p>
+
+<font size="3">局部时钟事件设备的注册</font>
+
+<p>`&lt;/p&gt;</p>
+<pre>cpu_up()
+  ...
+  -&gt; _cpu_up()
+     smp_ops.cpu_up(cpu)
+       -&gt; native_cpu_up()
+            -&gt; do_boot_cpu()
+                 -&gt; wakeup_secondary_cpu_via_init()
+                      -&gt; startup_ipi_hook()
+                         ......
+                         maybe (这块没太看懂怎么 invoke 的 start_secondary)
+                         start_secondary()
+                           -&gt; setup_secondary_APIC_clock()
+                                -&gt; setup_APIC_timer()
+                                     -&gt; clockevents_register_device(levt)`</pre>
+
+<p> </p>
+
+<p>其余的 CPU Lapic 注册过程和 CPU0 的一样也不复杂，最终都把相关 event_handler 初始化为 “tick_handle_periodic”</p>
+
+<p>可是 …… 但是 …… 还是那句话，,故事远没有结束这才是一个开始 ……</p>
+
+  </div>
+
+  
+    <div id="disqus_thread"></div>
+<script>
+    /**
+     *  RECOMMENDED CONFIGURATION VARIABLES: EDIT AND UNCOMMENT THE SECTION BELOW TO INSERT DYNAMIC VALUES FROM YOUR PLATFORM OR CMS.
+     *  LEARN WHY DEFINING THESE VARIABLES IS IMPORTANT: https://disqus.com/admin/universalcode/#configuration-variables
+     */
+    /*
+    var disqus_config = function () {
+        this.page.url = '<?php echo get_permalink(); ?>';  // Replace PAGE_URL with your page's canonical URL variable
+        this.page.identifier = '<?php echo dsq_identifier_for_post($post); ?>'; // Replace PAGE_IDENTIFIER with your page's unique identifier variable
+    };*/
+    (function() {  // DON'T EDIT BELOW THIS LINE
+        var d = document, s = d.createElement('script');
+        
+        s.src = 'https://bluezd.disqus.com/embed.js';
+        
+        s.setAttribute('data-timestamp', +new Date());
+        (d.head || d.body).appendChild(s);
+    })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+  
+</article>
+
+      </div>
+    </main>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+	  <!--<h2 class="footer-heading">Bluezd&#39;s Home</h2>-->
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li>
+            <!--
+              Bluezd&#39;s Home
+	      -->
+            </li>
+            
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/bluezd"><span class="icon icon--github"><svg viewBox="0 0 16 16" width="16px" height="16px"><path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/></svg>
+</span><span class="username">bluezd</span></a>
+
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/bluezd"><span class="icon icon--twitter"><svg viewBox="0 0 16 16" width="16px" height="16px"><path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/></svg>
+</span><span class="username">bluezd</span></a>
+
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-3">
+        <p>Stay Focused ~ Stay Positive</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+  </body>
+
+</html>
