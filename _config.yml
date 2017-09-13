@@ -1,1 +1,5 @@
+name: 'Bluezd&#039;s Home'
+description: Stay Focused ~ Stay Positive
 theme: jekyll-theme-architect
+disqus:
+        shortname: bluezd
