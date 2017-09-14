@@ -5,7 +5,10 @@ description: Stay Focused ~ Stay Positive
 highlighter: true
 theme: minima
 #theme: jekyll-theme-architect
-twitter_username: bluezd
+plugins: [jekyll-paginate]
+paginate: 5
+#paginate_path: "/posts:5/"
+twitter_username: bluezhudong
 github_username: bluezd
 disqus:
         shortname: bluezd
