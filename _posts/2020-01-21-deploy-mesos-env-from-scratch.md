@@ -11,13 +11,17 @@ tags:
 
 ## Introduction
 
-This article aims to deploy a pure mesos environment with the following capabilities:
+DC/OS is the perfect platform for running both docker and **mesos** workloads, it builds on top of apache mesos  and supports additional advanced features (eg: network, service catalog, etc.) It provides comprehensive installers for both Cloud(aws, azure and google) and On-Prem. If users are interested in the principle under the hood they can also provision their own mesos env from scratch with advanced overlay network support(dcos-net powered by D2IQ).
+
+This article aims to give you a guidence of deploying a pure mesos developing/testing environment with the following capabilities:
 
   1. **overlay network** by taking advantage of dcos-net module
   2. **DNS resolution**
-    1. **mesos-dns** by taking advantage of mesos-dns module
-    2. **dcos-dns** by taking advantage of dcos-dns(in dcos-net) module
+     1. **mesos-dns** by taking advantage of mesos-dns module
+     2. **dcos-dns** by taking advantage of dcos-dns(in dcos-net) module
   3. **container orchestration platform** by using marathon
+
+Now Let's get started.
 
 ## Environment preparation
 
@@ -355,17 +359,17 @@ export MESOS_NATIVE_JAVA_LIBRARY=/usr/local/mesos/lib/libmesos.so
 install container networking plugins:
 
   1. install golang env
-    1. `wget https://dl.google.com/go/go1.13.6.linux-amd64.tar.gz` 
-    2. `tar -C /usr/local -xzf go1.13.6.linux-amd64.tar.gz`
-    3. `export PATH=$PATH:/usr/local/go/bin`
+     1. `wget https://dl.google.com/go/go1.13.6.linux-amd64.tar.gz` 
+     2. `tar -C /usr/local -xzf go1.13.6.linux-amd64.tar.gz`
+     3. `export PATH=$PATH:/usr/local/go/bin`
   2. build container networking plugins  
-    1. `git clone https://github.com/containernetworking/plugins.git`
-    2. `cd plugins && ./build_linux.sh`
+     1. `git clone https://github.com/containernetworking/plugins.git`
+     2. `cd plugins && ./build_linux.sh`
   3. install container networking plugins 
-    1. `mkdir -p /etc/mesos/active/cni/`
-    2. `ln -s /root/plugins/bin/bridge /etc/mesos/active/cni/`
-    3. `ln -s /root/plugins/bin/host-local /etc/mesos/active/cni/`
-    4. `ln -s /usr/local/mesos/libexec/mesos/mesos-cni-port-mapper /etc/mesos/active/cni/`
+     1. `mkdir -p /etc/mesos/active/cni/`
+     2. `ln -s /root/plugins/bin/bridge /etc/mesos/active/cni/`
+     3. `ln -s /root/plugins/bin/host-local /etc/mesos/active/cni/`
+     4. `ln -s /usr/local/mesos/libexec/mesos/mesos-cni-port-mapper /etc/mesos/active/cni/`
 
 prepare conf file:
 
