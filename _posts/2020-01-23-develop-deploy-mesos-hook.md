@@ -11,6 +11,16 @@ tags:
 
 ## Introduction
 
+#### Background
+
+We know that mesos agent is responsible for launching tasks, is it possible to do some checks before launching tasks without re-compiling mesos code ?
+
+Yes! Developing shared libraries out of Mesos modules.
+
+Mesos modules provide a way to easily extend inner workings of Mesos by creating and using shared libraries that are loaded on demand.
+
+#### Mesos Modules
+
 Here is the detail introduction regarding mesos module [http://mesos.apache.org/documentation/latest/modules/](http://mesos.apache.org/documentation/latest/modules/), it supports a vast variety of modules, this article aims to introduce Hook.
 
 ## Developing Hook
@@ -277,8 +287,8 @@ mesos-agent \
 #### mesos agent loads modules and initialize on startup
 
   1. Load modules `Try<Nothing> result = ModuleManager::load(flags.modules.get());` in *`src/slave/main.cpp`*
-    1. `Try<Nothing> ModuleManager::loadManifest(const Modules& modules)` in *`src/module/manager.cpp`*
-    2. `moduleBases[moduleName] = moduleBase;`
+     1. `Try<Nothing> ModuleManager::loadManifest(const Modules& modules)` in *`src/module/manager.cpp`*
+     2. `moduleBases[moduleName] = moduleBase;`
   2. Initialize hooks `Try<Nothing> result = HookManager::initialize(flags.hooks.get());` in *`src/slave/main.cpp`*
      1. `Try<Hook*> module = ModuleManager::create<Hook>(hook);` in *`src/hook/manager.cpp`*
          1.  `Module<T>* module = (Module<T>*) moduleBases[moduleName];` in *`src/module/manager.hpp`*
